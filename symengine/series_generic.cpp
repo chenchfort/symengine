@@ -1,9 +1,9 @@
 #include <algorithm>
 #include <exception>
+#include <flint/fmpz_polyxx.h>
 #include <iterator>
 #include <symengine/series_generic.h>
 #include <symengine/series_visitor.h>
-
 using SymEngine::RCP;
 using SymEngine::make_rcp;
 
@@ -71,21 +71,52 @@ int UnivariateSeries::ldegree(const UnivariateExprPolynomial &s)
     return s.get_univariate_poly()->get_dict().begin()->first;
 }
 
+typedef std::complex<Expression> base;
+
+std::complex<Expression> operator*(const base &a, const base &b)
+{
+    return std::complex<Expression>(a.real() * b.real() - a.imag() * b.imag(),
+                                    a.imag() * b.real() + a.real() * b.imag());
+}
+
 UnivariateExprPolynomial
 UnivariateSeries::mul(const UnivariateExprPolynomial &a,
                       const UnivariateExprPolynomial &b, unsigned prec)
 {
     map_int_Expr p;
-    for (auto &it1 : a.get_univariate_poly()->get_dict()) {
-        for (auto &it2 : b.get_univariate_poly()->get_dict()) {
-            int exp = it1.first + it2.first;
-            if (exp < (int)prec) {
-                p[exp] += it1.second * it2.second;
-            } else {
-                break;
-            }
-        }
+    fmpz_poly_t fa, fb, res;
+    fmpz_poly_init(fa);
+    fmpz_poly_init(fb);
+    fmpz_poly_init(res);
+    for (const auto &it : a.get_univariate_poly()->get_dict()) {
+        fmpz_t r;
+        RCP<const Integer> x = rcp_dynamic_cast<const Integer>(it.second.get_basic());
+        fmpz_set_mpz(r, get_mpz_t(x->as_int()));
+        fmpz_poly_set_coeff_si(fa, it.first, fmpz_get_si(r));
     }
+    for (const auto &it : b.get_univariate_poly()->get_dict()) {
+        fmpz_t r;
+        RCP<const Integer> x
+            = rcp_dynamic_cast<const Integer>(it.second.get_basic());
+        fmpz_set_mpz(r, get_mpz_t(x->as_int()));
+        fmpz_poly_set_coeff_si(fb, it.first, fmpz_get_si(r));
+    }
+    //res = flint::mullow(fa, fb, prec);
+    fmpz_poly_mullow(res, fa, fb, prec);
+    for (int i = 0; i < res->length; i++) {
+        slong fc;
+        //const fmpz_t fc;
+        fc = fmpz_poly_get_coeff_si(res, i);
+        mpz_t gc;
+        mpz_init(gc);
+        fmpz_t zc;
+        fmpz_set_si(zc, fc);
+        fmpz_get_mpz(gc, zc);
+        integer_class r(fc);
+        mpz_clear(gc);
+        p[i] = Expression(r.get_si());
+    }
+
     if (a.get_univariate_poly()->get_var()->get_name() == "")
         return UnivariateExprPolynomial(UnivariatePolynomial::from_dict(
             b.get_univariate_poly()->get_var(), std::move(p)));
@@ -93,6 +124,39 @@ UnivariateSeries::mul(const UnivariateExprPolynomial &a,
         return UnivariateExprPolynomial(UnivariatePolynomial::from_dict(
             a.get_univariate_poly()->get_var(), std::move(p)));
 }
+
+/*void mullow(fmpz_poly_t res, const fmpz_poly_t poly1,
+                      const fmpz_poly_t poly2, slong n)
+{
+    const slong len1 = poly1->length;
+    const slong len2 = poly2->length;
+
+    if (len1 == 0 || len2 == 0 || n == 0) {
+        fmpz_poly_zero(res);
+        return;
+    }
+
+    if (res == poly1 || res == poly2) {
+        fmpz_poly_t t;
+        fmpz_poly_init2(t, n);
+        fmpz_poly_mullow(t, poly1, poly2, n);
+        fmpz_poly_swap(res, t);
+        fmpz_poly_clear(t);
+        return;
+    }
+
+    n = FLINT_MIN(n, len1 + len2 - 1);
+
+    fmpz_poly_fit_length(res, n);
+    if (len1 >= len2)
+        _fmpz_poly_mullow(res->coeffs, poly1->coeffs, len1, poly2->coeffs, len2,
+                          n);
+    else
+        _fmpz_poly_mullow(res->coeffs, poly2->coeffs, len2, poly1->coeffs, len1,
+                          n);
+    _fmpz_poly_set_length(res, n);
+    _fmpz_poly_normalise(res);
+}*/
 
 UnivariateExprPolynomial
 UnivariateSeries::pow(const UnivariateExprPolynomial &base, int exp,
