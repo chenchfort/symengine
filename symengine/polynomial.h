@@ -121,7 +121,7 @@ univariate_int_polynomial(RCP<const Symbol> i, map_uint_mpz &&dict)
 
 class UnivariatePolynomial : public Basic
 {
-private:
+public:
     int degree_;
     RCP<const Symbol> var_;
     map_int_Expr dict_;
@@ -213,7 +213,7 @@ univariate_polynomial(RCP<const Symbol> i, map_int_Expr &&dict)
 
 class UnivariateExprPolynomial
 {
-private:
+public:
     RCP<const UnivariatePolynomial> poly_;
 
 public:

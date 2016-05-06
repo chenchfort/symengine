@@ -4,6 +4,7 @@
 #include <iterator>
 #include <symengine/series_generic.h>
 #include <symengine/series_visitor.h>
+
 using SymEngine::RCP;
 using SymEngine::make_rcp;
 
@@ -71,72 +72,9 @@ int UnivariateSeries::ldegree(const UnivariateExprPolynomial &s)
     return s.get_univariate_poly()->get_dict().begin()->first;
 }
 
-void fp_init2(fmpz_poly_t poly, slong alloc)
-{
-    if (alloc) /* allocate space for alloc small coeffs */
-        poly->coeffs = (fmpz *)flint_calloc(alloc, sizeof(fmpz));
-    else
-        poly->coeffs = NULL;
-
-    poly->alloc = alloc;
-    poly->length = 0;
-}
-
-// FMPZ_POLY_INLINE
-void _fp_set_length(fmpz_poly_t poly, slong newlen)
-{
-    if (poly->length > newlen) {
-        slong i;
-        for (i = newlen; i < poly->length; i++)
-            _fmpz_demote(poly->coeffs + i);
-    }
-    poly->length = newlen;
-}
-
-// FMPZ_POLY_INLINE
-void fp_zero(fmpz_poly_t poly)
-{
-    _fp_set_length(poly, 0);
-}
-
-void mullow(fmpz_poly_t res, const fmpz_poly_t poly1, const fmpz_poly_t poly2,
-            slong n)
-{
-    const slong len1 = poly1->length;
-    const slong len2 = poly2->length;
-
-    if (len1 == 0 || len2 == 0 || n == 0) {
-        fp_zero(res);
-        // fmpz_poly_zero(res);
-        return;
-    }
-
-    if (res == poly1 || res == poly2) {
-        fmpz_poly_t t;
-        fp_init2(t, n);
-        mullow(t, poly1, poly2, n);
-        fmpz_poly_swap(res, t);
-        fmpz_poly_clear(t);
-        return;
-    }
-
-    // n = FLINT_MIN(n, len1 + len2 - 1);
-    n = std::min(n, len1 + len2 - 1);
-
-    fmpz_poly_fit_length(res, n);
-    if (len1 >= len2)
-        _fmpz_poly_mullow(res->coeffs, poly1->coeffs, len1, poly2->coeffs, len2,
-                          n);
-    else
-        _fmpz_poly_mullow(res->coeffs, poly2->coeffs, len2, poly1->coeffs, len1,
-                          n);
-    _fp_set_length(res, n);
-    _fmpz_poly_normalise(res);
-}
-
 UnivariateExprPolynomial
-UnivariateSeries::mul(const UnivariateExprPolynomial &a,
-                      const UnivariateExprPolynomial &b, unsigned prec)
+UnivariateSeries::mul3(const UnivariateExprPolynomial &a,
+                       const UnivariateExprPolynomial &b, unsigned prec)
 {
     map_int_Expr p;
     fmpz_poly_t fa, fb, res;
@@ -157,10 +95,14 @@ UnivariateSeries::mul(const UnivariateExprPolynomial &a,
         fmpz_set_mpz(r, get_mpz_t(x->as_int()));
         fmpz_poly_set_coeff_si(fb, it.first, fmpz_get_si(r));
     }
-    // fmpz_poly_mullow(res, fa, fb, prec);
-    mullow(res, fa, fb, prec);
+
+    fmpz_poly_mullow_KS(res, fa, fb, prec);
+    fmpz_poly_clear(fa);
+    fmpz_poly_clear(fb);
+
     for (int i = 0; i < res->length; i++)
         p[i] = Expression(fmpz_poly_get_coeff_si(res, i));
+    fmpz_poly_clear(res);
 
     if (a.get_univariate_poly()->get_var()->get_name() == "")
         return UnivariateExprPolynomial(UnivariatePolynomial::from_dict(
@@ -170,6 +112,798 @@ UnivariateSeries::mul(const UnivariateExprPolynomial &a,
             a.get_univariate_poly()->get_var(), std::move(p)));
 }
 
+class poly_t
+{
+public:
+    std::vector<Expression> coeffs;
+    signed long alloc;
+    signed long length;
+
+    poly_t() : alloc(0), length(0){};
+
+    poly_t(signed long alloc)
+    {
+        if (alloc) // allocate space for alloc small coeffs
+            coeffs.resize(alloc);
+        else
+            coeffs.clear();
+
+        this->alloc = alloc;
+        length = 0;
+    }
+
+    void normalize()
+    {
+        signed long i;
+        for (i = length - 1; (i >= 0) && coeffs[i] == 0; i--)
+            ;
+        length = i + 1;
+    }
+
+    void truncate(signed long newlen)
+    {
+        if (length > newlen) {
+            // for (signed long i = newlen; i < length; i++)
+            //  coeffs.erase(coeffs.begin() + i);
+            length = newlen;
+            normalize();
+        }
+    }
+
+    void realloc(signed long alloc)
+    {
+        if (alloc == 0) // Clear up, reinitialise
+        {
+            coeffs.clear();
+            *this = poly_t();
+            return;
+        }
+
+        if (this->alloc) // Realloc
+        {
+            truncate(alloc);
+            coeffs.resize(alloc);
+
+            if (alloc > this->alloc)
+                std::fill(coeffs.begin() + this->alloc,
+                          coeffs.end() - this->alloc, Expression(0));
+        } else {
+            coeffs.resize(alloc);
+        }
+
+        this->alloc = alloc;
+    }
+
+    void fit_length(signed long len)
+    {
+        if (len > alloc) {
+            // At least double number of allocated coeffs
+            if (len < 2 * alloc)
+                len = 2 * alloc;
+            realloc(len);
+        }
+    }
+
+    void set_length(signed long newlen)
+    {
+        // if (length > newlen)
+        //  for (signed long i = newlen; i < length; i++)
+        //    coeffs.erase(coeffs.begin() + i);
+        length = newlen;
+    }
+
+    void zero()
+    {
+        set_length(0);
+    }
+
+    void set_coeff(signed long n, const Expression &x)
+    {
+        if (x == 0) {
+            if (n >= length)
+                return;
+
+            coeffs[n] = Expression(0);
+
+            if (n == length - 1)
+                normalize();
+        } else {
+            fit_length(n + 1);
+
+            if (n + 1 > length) {
+                for (signed long i = length; i < n; i++)
+                    coeffs[i] = Expression(0);
+
+                length = n + 1;
+            }
+
+            coeffs[n] = x;
+        }
+    }
+
+    void get_coeff(Expression &x, signed long n)
+    {
+        if (n < length)
+            x = coeffs[n];
+        else
+            x = Expression(0);
+    }
+
+    void swap(poly_t &poly2)
+    {
+        if (this != &poly2) {
+            signed long temp;
+            std::vector<Expression> temp_c;
+
+            temp = length;
+            length = poly2.length;
+            poly2.length = temp;
+
+            temp = alloc;
+            alloc = poly2.alloc;
+            poly2.alloc = temp;
+
+            temp_c = coeffs;
+            coeffs = poly2.coeffs;
+            poly2.coeffs = temp_c;
+        }
+    }
+};
+
+void vec_add(Expression *res, const Expression *vec1, const Expression *vec2,
+             signed long len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        res[i] = vec1[i] + vec2[i];
+}
+
+void vec_sub(Expression *res, const Expression *vec1, const Expression *vec2,
+             signed long len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        res[i] = vec1[i] - vec2[i];
+}
+
+void vec_scalar_addmul_si(Expression *vec1, const Expression *vec2,
+                          signed long len2, const Expression &c)
+{
+    int cmp = c.get_basic()->__cmp__(*Expression(0).get_basic());
+    if (cmp == 0 || cmp == 1)
+        for (signed long i = 0; i < len2; i++)
+            vec1[i] += vec2[i] * c;
+    else
+        for (signed long i = 0; i < len2; i++)
+            vec1[i] -= vec2[i] * c;
+}
+
+void vec_scalar_addmul(Expression *poly1, const Expression *poly2,
+                       signed long len2, const Expression &x)
+{
+    const Expression &c = x;
+
+    // if (!COEFF_IS_MPZ(c)) {
+    if (c == 0)
+        return;
+    else if (c == 1)
+        vec_add(poly1, poly1, poly2, len2);
+    else if (c == -1)
+        vec_sub(poly1, poly1, poly2, len2);
+    else
+        vec_scalar_addmul_si(poly1, poly2, len2, c);
+    /*} else {
+        slong i;
+        for (i = 0; i < len2; i++)
+            *(poly1 + i) += *(poly2 + i) + Expression(*x);
+        // fmpz_addmul(poly1 + i, poly2 + i, x);
+    }*/
+}
+
+void vec_zero(Expression *vec, signed long len)
+{
+    for (signed long i = 0; i < len; i++)
+        vec[i] = Expression(0);
+}
+
+void vec_set(Expression *vec1, const Expression *vec2, signed long len2)
+{
+    if (vec1[0] != vec2[0])
+        for (signed long i = 0; i < len2; i++)
+            vec1[i] = vec2[i];
+}
+
+void vec_neg(Expression *vec1, const Expression *vec2, signed long len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        vec1[i] = -vec2[i];
+}
+
+void vec_scalar_mul_si(Expression *vec1, const Expression *vec2,
+                       signed long len2, const Expression &c)
+{
+    for (signed long i = 0; i < len2; i++)
+        vec1[i] = vec2[i] * c;
+}
+
+void vec_scalar_mul(Expression *poly1, const Expression *poly2,
+                    signed long len2, const Expression &x)
+{
+    const Expression &c = x;
+
+    // if (!COEFF_IS_MPZ(c)) {
+    if (c == 0)
+        vec_zero(poly1, len2);
+    else if (c == 1)
+        vec_set(poly1, poly2, len2);
+    else if (c == -1)
+        vec_neg(poly1, poly2, len2);
+    else
+        vec_scalar_mul_si(poly1, poly2, len2, c);
+    /*} else {
+        slong i;
+        for (i = 0; i < len2; i++)
+            *(poly1 + i) = *(poly2 + i) + *x;
+        // fmpz_mul(poly1 + i, poly2 + i, x);
+    }*/
+}
+
+void _poly_mullow_classical(std::vector<Expression> &res,
+                            const std::vector<Expression> &poly1,
+                            signed long len1,
+                            const std::vector<Expression> &poly2,
+                            signed long len2, signed long n)
+{
+    /* Special case if the length of output is 1 */
+    if ((len1 == 1 && len2 == 1) || n == 1) {
+        res[0] = poly1[0] * poly2[0];
+    } else {
+        /* Ordinary case */
+        signed long i;
+
+        /* Set res[i] = poly1[i]*poly2[0] */
+        vec_scalar_mul(&res[0], &poly1[0], std::min(len1, n), poly2[0]);
+
+        /* Set res[i+len1-1] = in1[len1-1]*in2[i] */
+        if (n > len1)
+            vec_scalar_mul(&res[len1], &poly2[1], n - len1, poly1[len1 - 1]);
+
+        /* out[i+j] += in1[i]*in2[j] */
+        for (i = 0; i < std::min(len1, n) - 1; i++)
+            vec_scalar_addmul(&res[i + 1], &poly2[1], std::min(len2, n - i) - 1,
+                              poly1[i]);
+    }
+}
+
+void poly_mullow_classical(poly_t &res, const poly_t &poly1,
+                           const poly_t &poly2, signed long n)
+{
+    signed long len_out;
+
+    if (poly1.length == 0 || poly2.length == 0 || n == 0) {
+        res.zero();
+        return;
+    }
+
+    len_out = poly1.length + poly2.length - 1;
+    if (n > len_out)
+        n = len_out;
+
+    if (&res == &poly1 || &res == &poly2) {
+        poly_t t(n);
+        _poly_mullow_classical(t.coeffs, poly1.coeffs, poly1.length,
+                               poly2.coeffs, poly2.length, n);
+        res.swap(t);
+    } else {
+        res.fit_length(n);
+        _poly_mullow_classical(res.coeffs, poly1.coeffs, poly1.length,
+                               poly2.coeffs, poly2.length, n);
+    }
+
+    res.set_length(n);
+    res.normalize();
+}
+
+void poly_mullow_kara_recursive(Expression *out, const Expression *pol1,
+                                      const Expression *pol2, Expression *temp, slong len)
+{
+    slong m1 = len / 2;
+    slong m2 = len - m1;
+    int odd = (len & 1);
+
+    if (len <= 6) {
+        _poly_mullow_classical(out, pol1, len, pol2, len, len);
+        return;
+    }
+
+    vec_add(temp + m2, pol1, pol1 + m1, m1);
+    if (odd)
+        fmpz_set(temp + m2 + m1, pol1 + 2 * m1);
+
+    vec_add(temp + 2 * m2, pol2, pol2 + m1, m1);
+    if (odd)
+        fmpz_set(temp + 2 * m2 + m1, pol2 + 2 * m1);
+
+    _fmpz_poly_mul_karatsuba(out, pol1, m1, pol2, m1);
+    fmpz_zero(out + 2 * m1 - 1);
+
+    poly_mullow_kara_recursive(temp, temp + m2, temp + 2 * m2,
+                                     temp + 3 * m2, m2);
+
+    poly_mullow_kara_recursive(temp + m2, pol1 + m1, pol2 + m1,
+                                     temp + 2 * m2, m2);
+
+    _fmpz_vec_sub(temp, temp, out, m2);
+    _fmpz_vec_sub(temp, temp, temp + m2, m2);
+
+    if (odd)
+        fmpz_set(out + 2 * m1, temp + m2);
+    _fmpz_vec_add(out + m1, out + m1, temp, m2);
+}
+
+/* Assumes poly1 and poly2 are not length 0. */
+void _poly_mullow_karatsuba_n(Expression *res, const Expression *poly1,
+                              const Expression *poly2, slong n)
+{
+    Expression *temp;
+    slong len, loglen = 0;
+
+    if (n == 1) {
+        *res = (*poly1) * (*poly2);
+        return;
+    }
+
+    while ((WORD(1) << loglen) < n)
+        loglen++;
+    len = (WORD(1) << loglen);
+
+    temp = _fmpz_vec_init(3 * len);
+
+    poly_mullow_kara_recursive(res, poly1, poly2, temp, n);
+}
+
+void poly_mullow_karatsuba_n(poly_t &res, const poly_t &poly1,
+                                  const poly_t &poly2, slong n)
+{
+    const slong len1 = std::min(poly1.length, n);
+    const slong len2 = std::min(poly2.length, n);
+    slong i, lenr;
+
+    vector<Expression> copy1, copy2;
+
+    if (len1 == 0 || len2 == 0) {
+        res.zero();
+        return;
+    }
+
+    lenr = len1 + len2 - 1;
+    if (n > lenr)
+        n = lenr;
+
+    if (len1 >= n)
+        &copy1 = poly1->coeffs;
+    else {
+        copy1.resize(n);
+        for (i = 0; i < len1; i++)
+            copy1[i] = poly1.coeffs[i];
+        std::fill(copy1.begin() + len1, copy1.end() - len1);
+    }
+
+    if (len2 >= n)
+        copy2 = poly2.coeffs;
+    else {
+        copy2.resize(n);
+        for (i = 0; i < len2; i++)
+            copy2[i] = poly2.coeffs[i];
+        std::fill(copy2.begin() + len2, copy2.end() - len2);
+    }
+
+    if (res != poly1 && res != poly2) {
+        res.fit_length(n);
+        _poly_mullow_karatsuba_n(&res.coeffs[0], &copy1[0], &copy2[0], n);
+    } else {
+        poly_t t(n);
+        _poly_mullow_karatsuba_n(&t.coeffs[0], &copy1[0], &copy2[0], n);
+        res.swap(t);
+    }
+    res.set_length(n);
+    res.normalise();
+}
+
+UnivariateExprPolynomial
+UnivariateSeries::mul(const UnivariateExprPolynomial &a,
+                      const UnivariateExprPolynomial &b, unsigned prec)
+{
+    map_int_Expr p;
+    poly_t fa, fb, res;
+
+    for (const auto &it : b.get_univariate_poly()->get_dict()) {
+        fb.set_coeff(it.first, it.second);
+    }
+    for (const auto &it : a.get_univariate_poly()->get_dict())
+        fa.set_coeff(it.first, it.second);
+
+    poly_mullow_classical(res, fa, fb, prec);
+
+    if (a.get_univariate_poly()->get_var()->get_name() == "")
+        return UnivariateExprPolynomial(UnivariatePolynomial::from_vec(
+            b.get_univariate_poly()->get_var(), std::move(res.coeffs)));
+    else
+        return UnivariateExprPolynomial(UnivariatePolynomial::from_vec(
+            a.get_univariate_poly()->get_var(), std::move(res.coeffs)));
+}
+
+/*typedef Expression Expression_t[1];
+
+typedef struct {
+    Expression *coeffs;
+    signed long alloc;
+    signed long length;
+} poly_struct;
+
+typedef poly_struct poly_t[1];
+
+void poly_init(poly_t poly)
+{
+    poly->coeffs = NULL;
+    poly->alloc = 0;
+    poly->length = 0;
+}
+
+void poly_clear(poly_t poly)
+{
+    if (poly->coeffs) {
+        signed long i;
+        for (i = 0; i < poly->alloc; i++)
+            free(poly->coeffs + i);
+        //_fmpz_demote(poly->coeffs + i);
+        free(poly->coeffs);
+        // flint_free(poly->coeffs);
+    }
+}
+
+void poly_normalize(poly_t poly)
+{
+    signed long i;
+    for (i = poly->length - 1; (i >= 0) && poly->coeffs[i] != 0; i--)
+        ;
+    poly->length = i + 1;
+}
+
+void poly_truncate(poly_t poly, signed long newlen)
+{
+    if (poly->length > newlen) {
+        std::cout << "trunc" << std::endl;
+        for (signed long i = newlen; i < poly->length; i++)
+            free(poly->coeffs + i);
+        //_fmpz_demote(poly->coeffs + i);
+        poly->length = newlen;
+        poly_normalize(poly);
+    }
+}
+
+void poly_realloc(poly_t poly, signed long alloc)
+{
+    if (alloc == 0) // Clear up, reinitialise
+    {
+        std::cout << "alloc == 0" << std::endl;
+        poly_clear(poly);
+        poly_init(poly);
+        return;
+    }
+
+    if (poly->alloc) // Realloc
+    {
+        poly_truncate(poly, alloc);
+
+        std::cout << "realloc " << alloc << std::endl;
+        poly->coeffs = (Expression *)realloc(poly->coeffs, (alloc) *
+sizeof(Expression));
+
+        if (alloc > poly->alloc) {
+            std::cout << "zero" << std::endl;
+            for (slong i = 0; i < (alloc - poly->alloc); i++)
+                ((mp_ptr)(poly->coeffs + poly->alloc))[i] = 0;
+        }
+    } else {
+        // Nothing allocated already so do it now
+        poly->coeffs = (Expression *)calloc(alloc, sizeof(Expression));
+        std::cout << "calloc " << alloc << std::endl;
+        // poly->coeffs = (fmpz *)flint_calloc(alloc, sizeof(fmpz));
+    }
+
+    poly->alloc = alloc;
+}
+
+void poly_fit_length(poly_t poly, signed long len)
+{
+    if (len > poly->alloc) {
+        // At least double number of allocated coeffs
+        if (len < 2 * poly->alloc)
+            len = 2 * poly->alloc;
+        poly_realloc(poly, len);
+    }
+}
+
+void poly_set_length(poly_t poly, signed long newlen)
+{
+    if (poly->length > newlen) {
+        for (signed long i = newlen; i < poly->length; i++)
+            free(poly->coeffs + i);
+        //_fmpz_demote(poly->coeffs + i);
+    }
+    poly->length = newlen;
+}
+
+void poly_zero(poly_t poly)
+{
+    poly_set_length(poly, 0);
+}
+
+void poly_set_coeff(poly_t poly, signed long n, const Expression x)
+{
+    std::cout << n << " " << x << std::endl;
+    if (x == 0) {
+        if (n >= poly->length)
+            return;
+
+        *(poly->coeffs + n) = Expression(0);
+
+        if (n == poly->length - 1)
+            // only necessary when setting leading coefficient
+            poly_normalize(poly);
+    } else {
+        poly_fit_length(poly, n + 1);
+
+        if (n + 1 > poly->length) {
+            for (signed long i = poly->length; i < n; i++)
+                *(poly->coeffs + i) = Expression(0);
+
+            poly->length = n + 1;
+        }
+
+        // fmpz_set(poly->coeffs + n, x);
+        std::cout << "p1" << " " << n << " " << poly->alloc << std::endl;
+        for (Expression *ptr = poly->coeffs; ptr; ptr++)
+            std::cout << *ptr << std::endl;
+        *(poly->coeffs + n) = x;
+    }
+}
+
+void poly_get_coeff(Expression &x, const poly_t poly, slong n)
+{
+    if (n < poly->length)
+        x = *(poly->coeffs + n);
+    // fmpz_set(x, poly->coeffs + n);
+    else
+        x = Expression(0);
+    // fmpz_zero(x);
+}
+
+void poly_swap(poly_t poly1, poly_t poly2)
+{
+    if (poly1 != poly2) {
+        signed long temp;
+        Expression *temp_c;
+
+        temp = poly1->length;
+        poly1->length = poly2->length;
+        poly2->length = temp;
+
+        temp = poly1->alloc;
+        poly1->alloc = poly2->alloc;
+        poly2->alloc = temp;
+
+        temp_c = poly1->coeffs;
+        poly1->coeffs = poly2->coeffs;
+        poly2->coeffs = temp_c;
+    }
+}
+
+void poly_init2(poly_t poly, signed long alloc)
+{
+    if (alloc) // allocate space for alloc small coeffs
+        poly->coeffs = (Expression *)calloc(alloc, sizeof(Expression));
+    // poly->coeffs = (fmpz *)flint_calloc(alloc, sizeof(fmpz));
+    else
+        poly->coeffs = NULL;
+
+    poly->alloc = alloc;
+    poly->length = 0;
+}
+
+void vec_add(Expression *res, const Expression *vec1, const Expression *vec2,
+             slong len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        *(res + i) = *(vec1 + i) + *(vec2 + i);
+    // fmpz_add(res + i, vec1 + i, vec2 + i);
+}
+
+void vec_sub(Expression *res, const Expression *vec1, const Expression *vec2,
+             slong len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        *(res + i) = *(vec1 + i) - *(vec2 + i);
+    // fmpz_sub(res + i, vec1 + i, vec2 + i);
+}
+
+void vec_scalar_addmul_si(Expression *vec1, const Expression *vec2, slong len2,
+                          const Expression &c)
+{
+    int cmp = c.get_basic()->__cmp__(*Expression(0).get_basic());
+    if (cmp == 0 || cmp == 1)
+        // if (c >= Expression(0))
+        for (signed long i = 0; i < len2; i++)
+            *(vec1 + i) = *(vec2 + i) + c;
+    // fmpz_addmul_ui(vec1 + i, vec2 + i, c);
+    else
+        for (signed long i = 0; i < len2; i++)
+            *(vec1 + i) = *(vec2 + i) - c;
+    // fmpz_submul_ui(vec1 + i, vec2 + i, -c);
+}
+
+void vec_scalar_addmul(Expression *poly1, const Expression *poly2, slong len2,
+                       const Expression_t x)
+{
+    Expression c = *x;
+
+    // if (!COEFF_IS_MPZ(c)) {
+    if (c == 0)
+        return;
+    else if (c == 1)
+        vec_add(poly1, poly1, poly2, len2);
+    else if (c == -1)
+        vec_sub(poly1, poly1, poly2, len2);
+    else
+        vec_scalar_addmul_si(poly1, poly2, len2, c);
+    //} else {
+      //  slong i;
+      //  for (i = 0; i < len2; i++)
+      //      *(poly1 + i) += *(poly2 + i) + Expression(*x);
+        // fmpz_addmul(poly1 + i, poly2 + i, x);
+    //}
+}
+
+void vec_zero(Expression *vec, slong len)
+{
+    for (signed long i = 0; i < len; i++)
+        *(vec + i) = Expression(0);
+    // fmpz_zero(vec + i);
+}
+
+void vec_set(Expression *vec1, const Expression *vec2, signed long len2)
+{
+    if (vec1 != vec2)
+        for (signed long i = 0; i < len2; i++)
+            *(vec1 + i) = *(vec2 + i);
+    // fmpz_set(vec1 + i, vec2 + i);
+}
+
+void vec_neg(Expression *vec1, const Expression *vec2, signed long len2)
+{
+    for (signed long i = 0; i < len2; i++)
+        *(vec1 + i) = -(*(vec2 + i));
+    // fmpz_neg(vec1 + i, vec2 + i);
+}
+
+void vec_scalar_mul_si(Expression *vec1, const Expression *vec2,
+                       signed long len2, const Expression &c)
+{
+    for (signed long i = 0; i < len2; i++)
+        *(vec1 + i) = *(vec2 + i) + c;
+    //  fmpz_mul_si(vec1 + i, vec2 + i, c);
+}
+
+void vec_scalar_mul(Expression *poly1, const Expression *poly2, slong len2,
+                    const Expression_t x)
+{
+    Expression c = *x;
+
+    // if (!COEFF_IS_MPZ(c)) {
+    if (c == 0)
+        vec_zero(poly1, len2);
+    else if (c == 1)
+        vec_set(poly1, poly2, len2);
+    else if (c == -1)
+        vec_neg(poly1, poly2, len2);
+    else
+        vec_scalar_mul_si(poly1, poly2, len2, c);
+    //} else {
+      //  slong i;
+      //  for (i = 0; i < len2; i++)
+      //      *(poly1 + i) = *(poly2 + i) + *x;
+        // fmpz_mul(poly1 + i, poly2 + i, x);
+    //}
+}
+
+void _poly_mullow_classical(Expression *res, const Expression *poly1,
+                            signed long len1, const Expression *poly2,
+                            signed long len2, signed long n)
+{
+    // Special case if the length of output is 1
+    if ((len1 == 1 && len2 == 1) || n == 1) {
+        *res = (*poly1) * (*poly2);
+        // fmpz_mul(res, poly1, poly2);
+    } else {
+        // Ordinary case
+        signed long i;
+
+        // Set res[i] = poly1[i]*poly2[0]
+        vec_scalar_mul(res, poly1, std::min(len1, n), poly2);
+
+        // Set res[i+len1-1] = in1[len1-1]*in2[i]
+        if (n > len1)
+            vec_scalar_mul(res + len1, poly2 + 1, n - len1, poly1 + len1 - 1);
+
+        // out[i+j] += in1[i]*in2[j]
+        for (i = 0; i < std::min(len1, n) - 1; i++)
+            vec_scalar_addmul(res + i + 1, poly2 + 1, std::min(len2, n - i) - 1,
+                              poly1 + i);
+    }
+}
+
+void poly_mullow_classical(poly_t res, const poly_t poly1, const poly_t poly2,
+                           signed long n)
+{
+    signed long len_out;
+
+    if (poly1->length == 0 || poly2->length == 0 || n == 0) {
+        poly_zero(res);
+        return;
+    }
+
+    len_out = poly1->length + poly2->length - 1;
+    if (n > len_out)
+        n = len_out;
+
+    if (res == poly1 || res == poly2) {
+        poly_t t;
+        poly_init2(t, n);
+        _poly_mullow_classical(t->coeffs, poly1->coeffs, poly1->length,
+                               poly2->coeffs, poly2->length, n);
+        poly_swap(res, t);
+        poly_clear(t);
+    } else {
+        poly_fit_length(res, n);
+        _poly_mullow_classical(res->coeffs, poly1->coeffs, poly1->length,
+                               poly2->coeffs, poly2->length, n);
+    }
+
+    poly_set_length(res, n);
+    poly_normalize(res);
+}
+
+UnivariateExprPolynomial
+UnivariateSeries::mul2(const UnivariateExprPolynomial &a,
+                       const UnivariateExprPolynomial &b, unsigned prec)
+{
+    map_int_Expr p;
+    poly_t fa, fb, res;
+    poly_init(fa);
+    poly_init(fb);
+    poly_init(res);
+
+    for (const auto &it : a.get_univariate_poly()->get_dict())
+        poly_set_coeff(fa, it.first, it.second);
+
+    for (const auto &it : b.get_univariate_poly()->get_dict())
+        poly_set_coeff(fb, it.first, it.second);
+
+    poly_mullow_classical(res, fa, fb, prec);
+    poly_clear(fa);
+    poly_clear(fb);
+
+    for (int i = 0; i < res->length; i++)
+        poly_get_coeff(p[i], res, i);
+    poly_clear(res);
+
+    if (a.get_univariate_poly()->get_var()->get_name() == "")
+        return UnivariateExprPolynomial(UnivariatePolynomial::from_dict(
+            b.get_univariate_poly()->get_var(), std::move(p)));
+    else
+        return UnivariateExprPolynomial(UnivariatePolynomial::from_dict(
+            a.get_univariate_poly()->get_var(), std::move(p)));
+}
+*/
 UnivariateExprPolynomial
 UnivariateSeries::pow(const UnivariateExprPolynomial &base, int exp,
                       unsigned prec)
