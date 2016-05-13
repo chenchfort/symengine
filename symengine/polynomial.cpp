@@ -554,78 +554,51 @@ bool UnivariatePolynomial::is_pow() const
            and dict_.begin()->first != 1 and dict_.begin()->first != 0;
 }
 
-RCP<const UnivariatePolynomial> add_uni_poly(const UnivariatePolynomial &a,
-                                             const UnivariatePolynomial &b)
+UnivariatePolynomial &add_uni_poly(UnivariatePolynomial &res,
+                                   const UnivariatePolynomial &o)
 {
-    map_int_Expr dict;
-    RCP<const Symbol> var = symbol("");
-    if (a.get_var()->get_name() == "") {
-        var = b.get_var();
-    } else if (b.get_var()->get_name() == "") {
-        var = a.get_var();
-    } else if (!(a.get_var()->__eq__(*b.get_var()))) {
+    if (res.get_var()->get_name() == "") {
+        res.var_ = o.get_var();
+    } else if (!(res.get_var()->__eq__(*o.get_var()))) {
         throw std::runtime_error("Error: variables must agree.");
-    } else {
-        var = a.get_var();
     }
-    for (const auto &it : a.get_dict())
-        dict[it.first] = it.second;
-    for (const auto &it : b.get_dict())
-        dict[it.first] += it.second;
-    return univariate_polynomial(var, std::move(dict));
+    for (const auto &it : o.get_dict())
+        res.dict_[it.first] += it.second;
+    return res;
 }
 
-RCP<const UnivariatePolynomial> neg_uni_poly(const UnivariatePolynomial &a)
+UnivariatePolynomial &neg_uni_poly(UnivariatePolynomial &res)
 {
-    map_int_Expr dict;
-    for (const auto &it : a.get_dict())
-        dict[it.first] = -1 * it.second;
-    return univariate_polynomial(a.get_var(), std::move(dict));
+    for (const auto &it : res.dict_)
+        it.second *= -1;
+    return res;
 }
 
-RCP<const UnivariatePolynomial> sub_uni_poly(const UnivariatePolynomial &a,
-                                             const UnivariatePolynomial &b)
+UnivariatePolynomial &sub_uni_poly(UnivariatePolynomial &res,
+                                   const UnivariatePolynomial &o)
 {
-    map_int_Expr dict;
-    RCP<const Symbol> var = symbol("");
-    if (a.get_var()->get_name() == "") {
-        var = b.get_var();
-    } else if (b.get_var()->get_name() == "") {
-        var = a.get_var();
-    } else if (!(a.get_var()->__eq__(*b.get_var()))) {
+    if (res.get_var()->get_name() == "") {
+        res.var_ = o.get_var();
+    } else if (!(res.get_var()->__eq__(*o.get_var()))) {
         throw std::runtime_error("Error: variables must agree.");
-    } else {
-        var = a.get_var();
     }
-    for (const auto &it : a.get_dict())
-        dict[it.first] = it.second;
-    for (const auto &it : b.get_dict())
-        dict[it.first] -= it.second;
-    return univariate_polynomial(var, std::move(dict));
+    for (const auto &it : o.get_dict())
+        res.dict_[it.first] -= it.second;
+    return res;
 }
 
-RCP<const UnivariatePolynomial> mul_uni_poly(RCP<const UnivariatePolynomial> a,
-                                             RCP<const UnivariatePolynomial> b)
+UnivariatePolynomial &
+mul_uni_poly(UnivariatePolynomial &res const UnivariatePolynomial &o)
 {
-    map_int_Expr dict;
-    RCP<const Symbol> var = symbol("");
-    if (a->get_var()->get_name() == "") {
-        var = b->get_var();
-    } else if (b->get_var()->get_name() == "") {
-        var = a->get_var();
-    } else if (!(a->get_var()->__eq__(*b->get_var()))) {
+    if (res.get_var()->get_name() == "") {
+        res.var_ = o.get_var();
+    } else if (!(res.get_var()->__eq__(*o.get_var()))) {
         throw std::runtime_error("Error: variables must agree.");
-    } else {
-        var = a->get_var();
     }
-
-    if (a->get_dict().empty() and b->get_dict().empty())
-        return univariate_polynomial(var, {{0, 0}});
-
-    for (const auto &i1 : a->get_dict())
-        for (const auto &i2 : b->get_dict())
-            dict[i1.first + i2.first] += i1.second * i2.second;
-    return univariate_polynomial(var, std::move(dict));
+    for (const auto &i1 : res.dict_)
+        for (const auto &i2 : o.get_dict())
+            res.dict_[i1.first + i2.first] += i1.second * i2.second;
+    return res;
 }
 
 } // SymEngine
