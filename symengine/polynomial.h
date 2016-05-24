@@ -441,6 +441,13 @@ public:
         return *this;
     }
 
+    int get_degree() const {
+        if (dict_.empty())
+            return 0;
+        else
+            return (--(dict_.end()))->first;
+    }
+
     std::string __str__(const std::string name) const
     {
         std::ostringstream o;
